@@ -36,6 +36,8 @@ CHAPA_API_URL = env("CHAPA_API_URL")
 DEBUG = env.bool("DEBUG", default=False)
 
 ALLOWED_HOSTS = []
+BROKER_URL = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="")
 
 
 # Application definition
@@ -52,6 +54,7 @@ INSTALLED_APPS = [
     "drf_yasg",
     "listings",
     "django_filters",
+    "celery",
 ]
 
 MIDDLEWARE = [

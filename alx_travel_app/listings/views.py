@@ -1,11 +1,21 @@
 from django.shortcuts import render
 from django.http import HttpResponse
 from datetime import date
-from .models import Booking, Listing
+from .models import Booking, Listing, Payment
 from rest_framework import viewsets
-from .serializers import ListingSerializer, BookingSerializer
-from rest_framework.permissions import IsAuthenticatedOrReadOnly
+from .serializers import ListingSerializer, BookingSerializer, PaymentSerializer
+from .permissions import IsOwnerOrReadOnly
+from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
+from rest_framework.response import Response
+from django.conf import settings
+import uuid
+import requests
+import json
+from django.views.decorators.csrf import csrf_exempt
+from django.http import JsonResponse
+
 
 # from rest_framework import filters
 from django_filters.rest_framework import DjangoFilterBackend
@@ -23,7 +33,7 @@ class ListingViewSet(viewsets.ModelViewSet):
 
     serializer_class = ListingSerializer
     queryset = Listing.objects.all()
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsOwnerOrReadOnly]
     filterset_class = ListingFilter
 
     def get_queryset(self):
@@ -76,7 +86,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         """
         get query set
         """
-        return Booking.objects.all()
+        user = self.request.user
+
+        # return Booking.objects.all()
         # if self.request.user.is__host:
         #     # for hosts return bookings related to their listing
         #     return Booking.objects.filter(property_id__host=self.request.user)
@@ -146,5 +158,154 @@ class BookingViewSet(viewsets.ModelViewSet):
         return Response({"status": "confirmed"}, status=status.HTTP_200_OK)
 
 
+class PaymentViewSet(viewsets.ModelViewSet):
+    """
+    Viewset for handling payments
+    """
+
+    serializer_class = PaymentSerializer
+    queryset = Payment.objects.all()
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        """
+        Allow authenticated users to create payments
+        """
+        booking = serializer.validated_date("booking_id")
+        if booking.user_id != self.request.user:
+            raise PermissionDenied("You can only pay for your own bookings")
+        with transaction.atomic():
+            # Generate unique transaction reference
+            tx_ref = f"{uuid.uuid4().hex[:10]}-{booking.booking_id}"
+            payment = serializer.save(
+                transaction_id=tx_ref,
+                status=Payment.Status.PENDING,
+            )
+            # prepare Chapa Payment data
+            chapa_data = {
+                "amaount": str(payment.amount),
+                "currency": "USD",
+                "tx_ref": tx_ref,
+                "email": payment.booking_id.user_id.email,
+                "first_name": str(payment.booking_id.user_id.first_name) or "User",
+                "last_name": str(payment.booking_id.user_id.last_name) or "User",
+                "phone_number": str(payment.booking_id.user_id.phone_number)
+                or "000-000-0000",
+                "return_url": self.request.build_absolute_url(
+                    "/api/payments/callback/"
+                ),
+                "callback_url": "https://webhook.site/077164d6-29cb-40df-ba29-8a00e59a7e60",
+                "title": f"Payment for Booking {booking.booking_id}",
+                "description": f"Payment for booking {booking.booking_id} at {booking.property_id.name}",
+            }
+            headers = {
+                "Authorization": f"Bearer {settings.CHAPA_SECRET_KEY}",
+                "Content-Type": "application/json",
+            }
+            try:
+
+                response = requests.post(
+                    f"{settings.CHAPA_API_URL}/transactions/initialize",
+                    json=chapa_data,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                chapa_response = response.json()
+                if chapa_response.get("status") == "success":
+                    # save checkout url
+                    payment.checkout_url = chapa_response.get("data", {}).get(
+                        "checkout_url"
+                    )
+                    payment.save()
+                    return Response(
+                        {
+                            "message": "Payment initiated successfully",
+                            "checkout_url": payment.checkout_url,
+                            "payment_id": str(payment.payment_id),
+                            ", ": tx_ref,
+                        },
+                        status=status.HTTP_201_CREATED,
+                    )
+                else:
+                    payment.status = Payment.Status.FAILED
+                    payment.save()
+                    return Response(
+                        {
+                            "message": "Payment initiation failed",
+                            "error": chapa_response.get(
+                                "message", "Failed to initiate payment"
+                            ),
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            except requests.exception.RequestExcepption as e:
+                payment.status = Payment.Status.FAILED
+                payment.save()
+                return Response(
+                    {
+                        "message": "Payment initiation failed",
+                        "error": f"Payment initialization failed: {str(e)}",
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+
 def index(request):
     return HttpResponse("Hello from Listings!")
+
+
+@csrf_exempt
+def payment_callback(request):
+    """
+    Handles the chapa payment callback
+    """
+    if request.method == "POST":
+        # verify webhook request
+        try:
+            chapa_tx_ref = request.POST.get("tx_ref")
+            payment = Payment.objects.get(transaction_id=chapa_tx_ref)
+
+            # verify payment with Chapa
+            headers = {
+                "Authorization": f"Bearer {settings.CHAPA_SECRET_KEY}",
+                "Content-Type": "application/jsom",
+            }
+            response = requests.get(
+                f"{settings.CHAPA_API_URL}/transactions/verify/{chapa_tx_ref}",
+                headers=headers,
+            )
+            response.raise_for_status()
+            chapa_response = response.json()
+
+            if chapa_response.get("status") == "success":
+                payment.status = Payment.Status.COMPLETED
+                payment.save()
+                return JsonResponse(
+                    {"status": "success", "message": "Payment Verified"}
+                )
+            else:
+                payment.status = Payment.Status.Failed
+                payment.save()
+                return JsonResponse(
+                    {"status": "failed", "messahe": "Payment verification failed"}
+                )
+
+        except Payment.DoesNotExist:
+            return JsonResponse(
+                {"status": "error", "message": "Payment not found"}, status=404
+            )
+        except requests.RequestException as e:
+            return JsonResponse(
+                {"status": "error", "message": f"Error verifying payment: {str(e)}"},
+                status=500,
+            )
+    return JsonResponse(
+        {"status": "error", "message": "Invalid request method"}, status=405
+    )
+
+
+def health_check(request):
+    """
+    simple health check endpoint
+    """
+    return JsonResponse({"status": "ok", "message": "API is healthy"}, status=200)
