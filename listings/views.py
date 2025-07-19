@@ -12,7 +12,6 @@ from rest_framework.response import Response
 from django.conf import settings
 import uuid
 import requests
-import json
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
 
@@ -40,7 +39,10 @@ class ListingViewSet(viewsets.ModelViewSet):
         """
         queryset to display all available listings
         """
-        return Listing.objects.all()
+        listings = Listing.objects.all()
+        print("Listing queryset:", listings)
+        # return Response(listings)
+        return listings
 
     def perform_create(self, serializer):
         """
@@ -89,12 +91,17 @@ class BookingViewSet(viewsets.ModelViewSet):
         user = self.request.user
 
         # return Booking.objects.all()
-        # if self.request.user.is__host:
-        #     # for hosts return bookings related to their listing
-        #     return Booking.objects.filter(property_id__host=self.request.user)
-        # else:
-        #     # for regular users return theri own bookings only
-        #     return Booking.objects.filter(user_id=self.request.user)
+        if user:
+            # for hosts return bookings related to their listing
+            # return Booking.objects.filter(property_id__host=user)
+            return Booking.objects.all()
+        elif user.is_anonymous:
+            # test t return all bookings
+            return Booking.objects.all()
+        else:
+            # for regular users return theri own bookings only
+            # return Booking.objects.filter(user_id=user)
+            return Booking.objects.all()
 
     def perform_create(self, serializer):
         listing = serializer.validated_date["property_id"]
@@ -126,10 +133,20 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         serializer.save()
 
+    def trigger_email_task(self, request):
+        """
+        Trigger the email task after booking creation
+        """
+        from .tasks import send_booking_confirmation_email
+
+        booking = self.get_object()
+        send_booking_confirmation_email.delay(booking)
+        return render(request, "booking_confirmation.html", {"booking": booking})
+
     @action(detail=True, methods=["patch"])
     def cancel(self, request, pk=None):
         """
-        for acncelling a booking
+        for cancelling a booking
         """
         booking = self.get_object()
 

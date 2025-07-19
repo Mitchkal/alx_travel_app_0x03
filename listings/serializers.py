@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import Booking, Review, Listing, Payment
 
 
-class BookingSerializer(serializers.Serializer):
+class BookingSerializer(serializers.ModelSerializer):
     """
     Serializer model for the Bookings
     """
@@ -22,7 +22,7 @@ class BookingSerializer(serializers.Serializer):
         read_only_fields = ["total_price"]
 
 
-class ListingSerializer(serializers.Serializer):
+class ListingSerializer(serializers.ModelSerializer):
     """
     Serializer for listings
     """
@@ -41,7 +41,7 @@ class ListingSerializer(serializers.Serializer):
         ]
 
 
-class ReviewSerializer(serializers.Serializer):
+class ReviewSerializer(serializers.ModelSerializer):
     """
     Serializer for reviews
     """
@@ -57,7 +57,7 @@ class ReviewSerializer(serializers.Serializer):
         ]
 
 
-class PaymentSerializer(serializers.Serializer):
+class PaymentSerializer(serializers.ModelSerializer):
     """
     Serializer for payments model
     """
@@ -70,5 +70,6 @@ class PaymentSerializer(serializers.Serializer):
             "amount",
             "created_at",
             "payment_method",
-            "transaction_id" "status",
+            "transaction_id",
+            "status",
         ]
